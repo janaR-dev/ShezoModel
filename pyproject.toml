@@ -1,0 +1,16 @@
+[project]
+name = "shezo"
+version = "0.1.0"
+description = "AI-assisted grounding and care-team reporting model for people who experience psychosis"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = []
+
+[project.optional-dependencies]
+dev = []
+
+[tool.setuptools.packages.find]
+include = ["shezo*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
