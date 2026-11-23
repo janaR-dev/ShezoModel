@@ -222,11 +222,48 @@ once and emits exactly one care-team alert.
 | `SHEZO_DB_ENGINE` | `mysql` (default) or `sqlite` |
 | `SHEZO_MYSQL_URL` | MySQL DSN, default `mysql://root@127.0.0.1:3306/shezo` |
 | `SHEZO_DB` | SQLite path used when the engine is sqlite (default `shezo.db`) |
-| `SHEZO_HOST` / `SHEZO_PORT` | bind address (default `127.0.0.1:8080`) |
+| `SHEZO_HOST` / `SHEZO_PORT` | bind address (default `127.0.0.1:8080`); `PORT` is used when `SHEZO_PORT` is unset (PaaS hosts) |
 | `SHEZO_LLM_API_KEY` | enables LLM narration |
 | `SHEZO_LLM_BASE_URL`, `SHEZO_LLM_MODEL` | endpoint/model override |
 | `SHEZO_WEBHOOK_URL` | extra delivery channel |
 | `SHEZO_SESSION_TIMEOUT_MINUTES` | idle session auto-close, default `90` (min 5) |
+
+## Hosting it for testers (free, HTTPS)
+
+Browsers only expose `getUserMedia` in a secure context, so a shared link must
+be HTTPS — `http://127.0.0.1` is the one local exception. There are two free
+routes:
+
+### Render (no machine needed)
+
+`render.yaml` at the repo root defines a free web service: `SHEZO_HOST=0.0.0.0`,
+SQLite storage, `/api/health` as the health check, and
+`python -m shezo.seed && python -m shezo.api` as the start command.
+
+1. Render → **New → Blueprint** → pick this repository → **Apply**.
+2. Deploy; Render serves it at `https://<name>.onrender.com` with a real
+   certificate, which is what makes camera/microphone capture work there.
+3. Optional: add `SHEZO_LLM_API_KEY` under **Environment** (never in git).
+
+Free instances sleep after 15 idle minutes (about a minute to wake) and have an
+ephemeral filesystem, so the SQLite database is re-seeded from `shezo.seed` on
+every boot and test data resets.
+
+### Cloudflare quick tunnel (uses this machine and its MySQL data)
+
+With `py -m shezo.api` running locally:
+
+```bash
+cloudflared tunnel --url http://127.0.0.1:8080
+```
+
+It prints an `https://<random>.trycloudflare.com` URL that is HTTPS, so the
+sensor consent flow works unchanged. It lives only while the tunnel and this
+machine stay up, and the URL changes each run. There is no account, but quick
+tunnels are rate-limited and have no uptime guarantee.
+
+Either way: the public instance uses the seeded demo accounts, so change those
+passwords (or the seed) before sharing, and keep real patient data out of it.
 
 ## Honest limitations
 
@@ -243,8 +280,10 @@ once and emits exactly one care-team alert.
   app summarises frames and loudness locally; there is no object detector beyond
   the browser's `FaceDetector`, no speaker diarisation, and no video/audio
   telemetry. HIPAA/GDPR paperwork and a real delivery provider are still needed.
-- **The web app is a local tool.** It binds to `127.0.0.1`, stores the bearer token
-  in `sessionStorage`, and has no TLS, no CSRF token and no multi-tenant
-  isolation beyond the care-team checks in the API.
+- **The web app is a demo, not a deployment.** By default it binds to
+  `127.0.0.1` and stores the bearer token in `sessionStorage`. `render.yaml`
+  gives a free HTTPS demo, but there is still no CSRF token, no encrypted
+  database, no session revocation list and no multi-tenant isolation beyond the
+  care-team checks in the API.
 - Crisis lines in `ai/safety.py` are examples (US 988, UK 111, EU 112); localise
   them per deployment.

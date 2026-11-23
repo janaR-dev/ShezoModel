@@ -550,7 +550,8 @@ def serve(
 
 def main() -> None:
     host = os.environ.get("SHEZO_HOST", "127.0.0.1")
-    port = int(os.environ.get("SHEZO_PORT", "8080"))
+    # PaaS hosts (Render and friends) inject PORT; SHEZO_PORT wins locally.
+    port = int(os.environ.get("SHEZO_PORT") or os.environ.get("PORT") or "8080")
     repo, label = open_backend()
     gateway = build_gateway()
     ctx = AppContext(
