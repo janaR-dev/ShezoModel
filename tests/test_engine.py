@@ -156,6 +156,43 @@ class EngineTests(unittest.TestCase):
         ]
         self.assertIn("session_summary", kinds)
 
+    def test_resume_returns_the_session_that_is_still_open(self):
+        resumed = self.engine.resume_session(self.patient.id)
+        self.assertIsNotNone(resumed)
+        self.assertEqual(resumed.id, self.session.id)
+
+    def test_idle_session_is_closed_and_summarised(self):
+        self.engine.close_session(self.session.id, distress_end=3)
+        stale = self.engine.open_session(
+            self.patient.id, distress=6, camera_consent=True, mic_consent=True
+        )
+        # Simulate a tab left open for days: no checks since it started.
+        stale.started_at = "2020-01-01T00:00:00+00:00"
+        self.repo.update_session(stale)
+
+        self.assertIsNone(self.engine.resume_session(self.patient.id))
+        stored = self.repo.get_session(stale.id)
+        self.assertEqual(stored.status, "closed")
+        self.assertIsNotNone(stored.ended_at)
+        summaries = [
+            report
+            for report in self.repo.list_reports_for_patient(self.patient.id)
+            if report.kind.value == "session_summary"
+        ]
+        self.assertEqual(len(summaries), 2)
+        self.assertIn("automatically", summaries[0].summary)
+        self.assertEqual(summaries[0].payload["closed_reason"], "timeout")
+
+    def test_resumed_session_takes_the_new_consent(self):
+        adopted = self.engine.adopt_session(
+            self.session, distress=9, camera_consent=False, mic_consent=False
+        )
+        stored = self.repo.get_session(self.session.id)
+        self.assertEqual(adopted.id, self.session.id)
+        self.assertFalse(stored.camera_consent)
+        self.assertFalse(stored.mic_consent)
+        self.assertEqual(stored.distress_start, 7)
+
     def test_closed_session_rejects_new_checks(self):
         self.engine.close_session(self.session.id, distress_end=2)
         with self.assertRaises(ValueError):

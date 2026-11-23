@@ -8,10 +8,11 @@ sample, extracts numbers/labels, and the sample is discarded.
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import threading
 import uuid
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from .models import (
     CareTeamMember,
@@ -202,9 +203,25 @@ def _jl(value: str) -> Any:
 class Repository:
     """Thread-safe-enough SQLite repository (serialised with a lock)."""
 
-    def __init__(self, path: str = ":memory:") -> None:
-        self.path = path
+    def __init__(self, path: str = ":memory:", dsn: Optional[str] = None) -> None:
+        """Open the shared record.
+
+        ``path`` selects SQLite (the default, and what the tests use). Passing
+        ``dsn`` (``mysql://...``) selects the MySQL/MariaDB backend instead; both
+        expose the same connection surface, so the queries below are shared.
+        """
         self._lock = threading.RLock()
+        self.backend = "sqlite"
+        if dsn:
+            from .mysql import connect as connect_mysql
+
+            # ``connect`` creates the database and its tables on first run.
+            self.path = dsn
+            self.conn = connect_mysql(dsn)
+            self.backend = "mysql"
+            return
+
+        self.path = path
         self.conn = sqlite3.connect(path, check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA foreign_keys = ON")
@@ -554,8 +571,18 @@ class Repository:
     def update_session(self, session: Session) -> None:
         with self._lock:
             self.conn.execute(
-                "UPDATE sessions SET ended_at=?, distress_end=?, status=? WHERE id=?",
-                (session.ended_at, session.distress_end, session.status, session.id),
+                "UPDATE sessions SET started_at=?, ended_at=?, distress_end=?, "
+                "camera_consent=?, mic_consent=?, distress_start=?, status=? WHERE id=?",
+                (
+                    session.started_at,
+                    session.ended_at,
+                    session.distress_end,
+                    1 if session.camera_consent else 0,
+                    1 if session.mic_consent else 0,
+                    session.distress_start,
+                    session.status,
+                    session.id,
+                ),
             )
             self.conn.commit()
 
@@ -853,3 +880,29 @@ class Repository:
             }
             for row in rows
         ]
+
+
+def open_backend() -> Tuple[Repository, str]:
+    """Open the configured store and return ``(repository, human label)``.
+
+    ``SHEZO_DB_ENGINE`` picks the backend (``mysql`` by default so the local
+    phpMyAdmin database is used, ``sqlite`` to fall back). If MySQL cannot be
+    reached the server still starts on SQLite instead of failing outright, and
+    the reason is printed.
+    """
+    engine = (os.environ.get("SHEZO_DB_ENGINE") or "mysql").strip().lower()
+    if engine == "mysql":
+        from .mysql import DEFAULT_DSN, MysqlUnavailable
+
+        dsn = (os.environ.get("SHEZO_MYSQL_URL") or os.environ.get("SHEZO_DATABASE_URL") or DEFAULT_DSN)
+        try:
+            repo = Repository(dsn=dsn)
+            return repo, f"mysql:{repo.conn.config['database']}@{repo.conn.config['host']}"
+        except (MysqlUnavailable, ValueError, OSError) as exc:
+            print(f"[shezo] MySQL unavailable ({exc}); falling back to SQLite.")
+    elif engine != "sqlite":
+        raise ValueError(f"unknown SHEZO_DB_ENGINE: {engine!r} (use mysql or sqlite)")
+
+    path = os.environ.get("SHEZO_DB") or "shezo.db"
+    return Repository(path), f"sqlite:{path}"
+

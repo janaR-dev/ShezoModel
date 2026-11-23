@@ -1,0 +1,447 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="dark" />
+    <title>Shezo — grounding support</title>
+    <meta
+      name="description"
+      content="Shezo is a decision-support tool for people who experience psychosis and the care team around them. It reports sensor evidence only; it never diagnoses."
+    />
+    <link rel="stylesheet" href="/tailwind.css" />
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%230b1220'/%3E%3Cpath d='M16 7l7 4v6c0 4-3 7-7 8-4-1-7-4-7-8v-6l7-4z' fill='none' stroke='%233ee0b4' stroke-width='2'/%3E%3C/svg%3E" />
+    <script src="/vendor/chart.umd.js" defer></script>
+    <script src="/app.js" defer></script>
+  </head>
+  <body class="min-h-screen bg-ink-950 font-sans text-slate-100">
+    <!-- ───────────────────────────────────────────────────────── toasts -->
+    <div
+      id="toast-host"
+      class="pointer-events-none fixed inset-x-0 top-4 z-50 flex flex-col items-center gap-2 px-4"
+      aria-live="polite"
+      aria-atomic="true"
+    ></div>
+
+    <!-- ───────────────────────────────────────────────────────── login -->
+    <main id="login-layer" class="mx-auto grid min-h-screen max-w-6xl items-center gap-10 px-5 py-10 lg:grid-cols-[1.1fr_0.9fr] lg:gap-16">
+      <section class="space-y-7">
+        <div class="flex items-center gap-3">
+          <span class="grid h-11 w-11 place-items-center rounded-2xl bg-mint-400/15 ring-1 ring-mint-400/40">
+            <svg viewBox="0 0 24 24" class="h-6 w-6 text-mint-300" fill="none" stroke="currentColor" stroke-width="1.7">
+              <path d="M12 3l7 3.5v5.2c0 4.1-2.9 7.4-7 8.8-4.1-1.4-7-4.7-7-8.8V6.5L12 3z" stroke-linejoin="round" />
+              <path d="M9 12l2 2 4-4.2" stroke-linecap="round" stroke-linejoin="round" />
+            </svg>
+          </span>
+          <div>
+            <p class="text-lg font-semibold tracking-tight">Shezo</p>
+            <p class="text-xs uppercase tracking-[0.22em] text-slate-500">Reality grounding · care team</p>
+          </div>
+        </div>
+
+        <h1 class="max-w-xl text-4xl font-semibold leading-[1.1] tracking-tight text-white sm:text-5xl">
+          When the room feels wrong,
+          <span class="text-mint-300">check what the camera actually saw.</span>
+        </h1>
+        <p class="max-w-xl text-base leading-relaxed text-slate-400">
+          Shezo reads your device's own camera and microphone summaries during a session you open, tells you
+          only what they did or did not pick up, and sends the record to the clinician and family member
+          assigned to you. It does not diagnose, and it never decides your experience for you.
+        </p>
+
+        <div class="grid gap-3 sm:grid-cols-3">
+          <div class="panel p-4">
+            <p class="text-xs font-semibold uppercase tracking-wider text-mint-300">Patient</p>
+            <p class="mt-1 text-sm text-slate-300">Grounding checks, medication reminders, your care team.</p>
+          </div>
+          <div class="panel p-4">
+            <p class="text-xs font-semibold uppercase tracking-wider text-amber-300">Caretaker</p>
+            <p class="mt-1 text-sm text-slate-300">Adherence, distress trend, escalations, report inbox.</p>
+          </div>
+          <div class="panel p-4">
+            <p class="text-xs font-semibold uppercase tracking-wider text-indigo-300">Therapist</p>
+            <p class="mt-1 text-sm text-slate-300">Patient record, session history, notes, medication plan.</p>
+          </div>
+        </div>
+
+        <p class="max-w-xl rounded-xl border border-amber-400/25 bg-amber-400/10 px-4 py-3 text-xs leading-relaxed text-amber-100/90">
+          <strong class="font-semibold">Decision support, not a medical device.</strong>
+          Nothing here replaces clinical judgement. If you might act on a thought, call your local emergency
+          number — for example 988 (US), 111 (UK) or 112 (EU).
+        </p>
+      </section>
+
+      <section class="panel p-6 sm:p-8">
+        <h2 class="text-xl font-semibold tracking-tight">Sign in</h2>
+        <p class="mt-1 text-sm text-slate-400">Your role comes from your account, not from this page.</p>
+
+        <form id="login-form" class="mt-6 space-y-4" autocomplete="on">
+          <div>
+            <label class="label" for="login-email">Email</label>
+            <input id="login-email" class="field" type="email" name="email" autocomplete="username" required placeholder="you@example.com" />
+          </div>
+          <div>
+            <label class="label" for="login-password">Password</label>
+            <input id="login-password" class="field" type="password" name="password" autocomplete="current-password" required placeholder="••••••••" />
+          </div>
+          <p id="login-error" class="hidden rounded-lg bg-rose-500/10 px-3 py-2 text-sm text-rose-200 ring-1 ring-inset ring-rose-400/30"></p>
+          <button id="login-submit" class="btn-primary w-full" type="submit">Sign in</button>
+        </form>
+
+        <div class="mt-7 border-t border-white/10 pt-5">
+          <p class="text-xs font-semibold uppercase tracking-wider text-slate-500">Demo accounts (seeded)</p>
+          <div class="mt-3 grid gap-2">
+            <button class="btn-ghost justify-between" data-demo="jordan@example.com|patient-pass-1">
+              <span class="text-left"><span class="block text-sm font-medium">Jordan · patient</span><span class="block text-xs text-slate-400">jordan@example.com</span></span>
+              <span class="text-xs text-slate-500">Use</span>
+            </button>
+            <button class="btn-ghost justify-between" data-demo="sam@family.example|family-pass-1">
+              <span class="text-left"><span class="block text-sm font-medium">Sam · caretaker</span><span class="block text-xs text-slate-400">sam@family.example</span></span>
+              <span class="text-xs text-slate-500">Use</span>
+            </button>
+            <button class="btn-ghost justify-between" data-demo="dr.reyes@clinic.example|therapy-pass-1">
+              <span class="text-left"><span class="block text-sm font-medium">Dr. Reyes · therapist</span><span class="block text-xs text-slate-400">dr.reyes@clinic.example</span></span>
+              <span class="text-xs text-slate-500">Use</span>
+            </button>
+          </div>
+          <p class="mt-3 text-xs text-slate-500">
+            No accounts yet? Run <code class="rounded bg-white/10 px-1.5 py-0.5 font-mono text-[11px]">py -m shezo.seed</code>
+          </p>
+        </div>
+      </section>
+    </main>
+
+    <!-- ────────────────────────────────────────────────────── app shell -->
+    <div id="app-shell" class="hidden min-h-screen">
+      <header class="sticky top-0 z-30 border-b border-white/10 bg-ink-950/85 backdrop-blur">
+        <div class="mx-auto flex max-w-7xl flex-wrap items-center gap-3 px-4 py-3 lg:px-8">
+          <div class="flex items-center gap-2.5">
+            <span class="grid h-9 w-9 place-items-center rounded-xl bg-mint-400/15 ring-1 ring-mint-400/40">
+              <svg viewBox="0 0 24 24" class="h-5 w-5 text-mint-300" fill="none" stroke="currentColor" stroke-width="1.7">
+                <path d="M12 3l7 3.5v5.2c0 4.1-2.9 7.4-7 8.8-4.1-1.4-7-4.7-7-8.8V6.5L12 3z" stroke-linejoin="round" />
+                <path d="M9 12l2 2 4-4.2" stroke-linecap="round" stroke-linejoin="round" />
+              </svg>
+            </span>
+            <div class="leading-tight">
+              <p class="text-sm font-semibold">Shezo</p>
+              <p class="text-[11px] uppercase tracking-[0.2em] text-slate-500">Grounding support</p>
+            </div>
+          </div>
+
+          <nav id="app-nav" class="ml-2 flex items-center gap-1 text-sm"></nav>
+
+          <div class="ml-auto flex items-center gap-3">
+            <span class="hidden items-center gap-1.5 text-xs text-slate-400 sm:flex">
+              <span class="h-1.5 w-1.5 rounded-full bg-mint-400"></span> API connected
+            </span>
+            <div class="text-right leading-tight">
+              <p id="current-user" class="text-sm font-medium">—</p>
+              <p id="current-role" class="text-[11px] uppercase tracking-wider text-slate-500">—</p>
+            </div>
+            <button id="logout-btn" class="btn-quiet" type="button">Sign out</button>
+          </div>
+        </div>
+      </header>
+
+      <!-- ───────────────────────────────────────────── patient view -->
+      <section id="view-patient" class="mx-auto hidden max-w-7xl space-y-6 px-4 py-6 lg:px-8 lg:py-8">
+        <div class="flex flex-wrap items-end justify-between gap-3">
+          <div>
+            <h1 class="text-2xl font-semibold tracking-tight text-white">Hi <span id="patient-name">there</span></h1>
+            <p class="muted mt-1">Grounding checks, reminders and the people assigned to help you.</p>
+          </div>
+          <p class="chip bg-mint-400/10 text-mint-200 ring-mint-400/30">Sensor evidence only · no diagnosis</p>
+        </div>
+
+        <div class="grid gap-6 lg:grid-cols-12">
+          <div class="space-y-6 lg:col-span-7">
+            <!-- session + check -->
+            <article class="panel">
+              <div class="panel-head">
+                <div>
+                  <h2 class="font-semibold tracking-tight">Grounding session</h2>
+                  <p class="text-xs text-slate-400">Camera and microphone are read only while a session you opened is running.</p>
+                </div>
+                <span id="session-chip" class="chip bg-white/5 text-slate-300 ring-white/15">Session closed</span>
+              </div>
+              <div class="panel-body space-y-5">
+                <div class="grid gap-3 sm:grid-cols-2">
+                  <label class="flex cursor-pointer items-start gap-3 rounded-xl border border-white/10 bg-ink-950/50 p-3">
+                    <input id="consent-camera" type="checkbox" class="mt-0.5 h-4 w-4 accent-mint-400" />
+                    <span>
+                      <span class="block text-sm font-medium">Camera</span>
+                      <span class="block text-xs text-slate-400">Brightness, motion, faces and detector labels stay on this device until you send them.</span>
+                    </span>
+                  </label>
+                  <label class="flex cursor-pointer items-start gap-3 rounded-xl border border-white/10 bg-ink-950/50 p-3">
+                    <input id="consent-mic" type="checkbox" class="mt-0.5 h-4 w-4 accent-mint-400" />
+                    <span>
+                      <span class="block text-sm font-medium">Microphone</span>
+                      <span class="block text-xs text-slate-400">Loudness and speech presence for one short window per check.</span>
+                    </span>
+                  </label>
+                </div>
+
+                <div>
+                  <label class="label" for="claim-input">What are you noticing?</label>
+                  <textarea
+                    id="claim-input"
+                    rows="3"
+                    class="field resize-none"
+                    maxlength="600"
+                    placeholder="e.g. There is a man standing in the corner by the door watching me."
+                  ></textarea>
+                  <div class="mt-2 flex flex-wrap gap-2">
+                    <button class="btn-quiet bg-white/5 ring-1 ring-inset ring-white/10" data-claim="There is a man standing in the corner by the door watching me.">Figure by the door</button>
+                    <button class="btn-quiet bg-white/5 ring-1 ring-inset ring-white/10" data-claim="The voices are telling me to go outside and meet them.">Voices telling me to go out</button>
+                    <button class="btn-quiet bg-white/5 ring-1 ring-inset ring-white/10" data-claim="I can hear whispering coming from the wall.">Whispering from the wall</button>
+                    <button class="btn-quiet bg-white/5 ring-1 ring-inset ring-white/10" data-claim="Is someone at the window? I think I see a person.">Someone at the window</button>
+                  </div>
+                </div>
+
+                <div>
+                  <div class="flex items-center justify-between">
+                    <label class="label mb-0" for="distress-range">How distressing is this right now?</label>
+                    <output id="distress-value" class="text-sm font-semibold text-mint-300">5 / 10</output>
+                  </div>
+                  <input id="distress-range" type="range" min="0" max="10" step="1" value="5" class="mt-2 w-full accent-mint-400" />
+                </div>
+
+                <div class="flex flex-wrap items-center gap-2">
+                  <button id="start-session-btn" class="btn-primary" type="button">
+                    <svg viewBox="0 0 24 24" class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M6 5h12v14H6z" /><path d="M9 5v14" /></svg>
+                    Start session
+                  </button>
+                  <button id="end-session-btn" class="btn-ghost" type="button" disabled>End session</button>
+                  <button id="check-btn" class="btn-primary ml-auto" type="button" disabled>Run reality check</button>
+                </div>
+
+                <div id="sensor-panel" class="rounded-xl border border-white/10 bg-ink-950/50 p-3">
+                  <div class="flex flex-wrap items-center gap-3">
+                    <div class="relative h-24 w-32 shrink-0 overflow-hidden rounded-lg bg-ink-800">
+                      <video id="camera-preview" class="h-full w-full object-cover" muted playsinline></video>
+                      <span id="camera-placeholder" class="absolute inset-0 grid place-items-center text-[11px] text-slate-500">camera off</span>
+                    </div>
+                    <dl id="sensor-metrics" class="grid flex-1 grid-cols-2 gap-x-4 gap-y-1 text-xs text-slate-400 sm:grid-cols-3">
+                      <div><dt class="text-slate-500">Brightness</dt><dd id="m-brightness" class="font-mono text-slate-200">—</dd></div>
+                      <div><dt class="text-slate-500">Blur</dt><dd id="m-blur" class="font-mono text-slate-200">—</dd></div>
+                      <div><dt class="text-slate-500">Motion</dt><dd id="m-motion" class="font-mono text-slate-200">—</dd></div>
+                      <div><dt class="text-slate-500">Faces</dt><dd id="m-faces" class="font-mono text-slate-200">—</dd></div>
+                      <div><dt class="text-slate-500">Room level</dt><dd id="m-audio" class="font-mono text-slate-200">—</dd></div>
+                      <div><dt class="text-slate-500">Labels</dt><dd id="m-labels" class="truncate font-mono text-slate-200">—</dd></div>
+                    </dl>
+                  </div>
+                  <p id="sensor-note" class="mt-3 text-[11px] leading-relaxed text-slate-500">
+                    Your browser computes these numbers; no video or audio is uploaded. Object labels come from
+                    the browser's built-in detector when it has one, so an empty label list is not proof of anything.
+                  </p>
+                </div>
+              </div>
+            </article>
+
+            <!-- result -->
+            <article id="result-panel" class="panel hidden">
+              <div class="panel-head">
+                <h2 class="font-semibold tracking-tight">This check</h2>
+                <span id="result-risk" class="chip bg-white/5 text-slate-300 ring-white/15">—</span>
+              </div>
+              <div class="panel-body space-y-4">
+                <div class="flex flex-wrap items-start justify-between gap-3">
+                  <p id="result-headline" class="max-w-xl text-lg font-medium leading-snug text-white">—</p>
+                  <span id="result-verdict" class="chip bg-white/5 text-slate-200 ring-white/15">—</span>
+                </div>
+                <div>
+                  <div class="flex items-center justify-between text-xs text-slate-400">
+                    <span>Confidence in the sensor reading (capped at 0.90)</span>
+                    <span id="result-confidence" class="font-mono text-slate-200">—</span>
+                  </div>
+                  <div class="mt-1.5 h-1.5 overflow-hidden rounded-full bg-white/10">
+                    <div id="result-confidence-bar" class="h-full w-0 rounded-full bg-mint-400 transition-all"></div>
+                  </div>
+                </div>
+                <p id="result-explanation" class="text-sm leading-relaxed text-slate-300"></p>
+                <div class="rounded-xl border border-white/10 bg-ink-950/60 p-3">
+                  <p class="text-xs font-semibold uppercase tracking-wider text-slate-500">What the sensors reported</p>
+                  <p id="result-sensor" class="mt-1 text-xs leading-relaxed text-slate-400"></p>
+                </div>
+                <div>
+                  <p class="text-xs font-semibold uppercase tracking-wider text-slate-500">Grounding steps</p>
+                  <ol id="result-steps" class="mt-2 space-y-2"></ol>
+                </div>
+                <p id="result-disclosure" class="rounded-xl bg-white/5 px-3 py-2 text-[11px] leading-relaxed text-slate-400"></p>
+              </div>
+            </article>
+          </div>
+
+          <div class="space-y-6 lg:col-span-5">
+            <article class="panel">
+              <div class="panel-head">
+                <h2 class="font-semibold tracking-tight">Medication</h2>
+                <span id="adherence-chip" class="chip bg-white/5 text-slate-300 ring-white/15">—</span>
+              </div>
+              <div class="panel-body space-y-4">
+                <p id="reminder-message" class="text-sm leading-relaxed text-slate-300">—</p>
+                <div id="dose-list" class="space-y-2"></div>
+                <div class="chart-box h-40"><canvas id="chart-patient-adherence" aria-label="Dose adherence in the tracking window"></canvas></div>
+              </div>
+            </article>
+
+            <article class="panel">
+              <div class="panel-head"><h2 class="font-semibold tracking-tight">Your week</h2></div>
+              <div class="panel-body space-y-3">
+                <div class="flex items-center gap-3">
+                  <span id="patient-trend-chip" class="chip bg-white/5 text-slate-300 ring-white/15">—</span>
+                  <p id="patient-trend-copy" class="text-xs leading-relaxed text-slate-400">—</p>
+                </div>
+                <dl id="patient-week-stats" class="grid grid-cols-3 gap-3 text-center"></dl>
+              </div>
+            </article>
+
+            <article class="panel">
+              <div class="panel-head"><h2 class="font-semibold tracking-tight">Your care team</h2></div>
+              <div class="panel-body">
+                <ul id="care-team" class="space-y-3 text-sm"></ul>
+                <p id="emergency-contact" class="mt-4 rounded-lg bg-rose-500/10 px-3 py-2 text-xs text-rose-100 ring-1 ring-inset ring-rose-400/25"></p>
+              </div>
+            </article>
+          </div>
+        </div>
+
+        <div class="grid gap-6 lg:grid-cols-12">
+          <article class="panel lg:col-span-7">
+            <div class="panel-head">
+              <h2 class="font-semibold tracking-tight">Recent checks</h2>
+              <span class="text-xs text-slate-500">Shared with your care team</span>
+            </div>
+            <div id="recent-checks" class="panel-body space-y-3"></div>
+          </article>
+          <article class="panel lg:col-span-5">
+            <div class="panel-head"><h2 class="font-semibold tracking-tight">Today's plan</h2></div>
+            <div id="med-list" class="panel-body space-y-3"></div>
+          </article>
+        </div>
+      </section>
+
+      <!-- ─────────────────────────────────────────── caretaker view -->
+      <section id="view-caretaker" class="mx-auto hidden max-w-7xl space-y-6 px-4 py-6 lg:px-8 lg:py-8">
+        <div class="flex flex-wrap items-end justify-between gap-3">
+          <div>
+            <h1 class="text-2xl font-semibold tracking-tight text-white">Care overview</h1>
+            <p class="muted mt-1">Adherence, distress relief and escalations for the people assigned to you.</p>
+          </div>
+          <span class="chip bg-amber-400/10 text-amber-200 ring-amber-400/30">Descriptive tracking · not a clinical assessment</span>
+        </div>
+
+        <div id="caretaker-stats" class="grid gap-4 sm:grid-cols-2 lg:grid-cols-4"></div>
+
+        <div class="grid gap-6 lg:grid-cols-12">
+          <article class="panel lg:col-span-4">
+            <div class="panel-head"><h2 class="font-semibold tracking-tight">Patients</h2></div>
+            <div id="caretaker-patients" class="panel-body space-y-2"></div>
+          </article>
+          <article class="panel lg:col-span-8">
+            <div class="panel-head">
+              <h2 class="font-semibold tracking-tight">Progress</h2>
+              <span id="caretaker-detail-range" class="text-xs text-slate-500">Last 14 days</span>
+            </div>
+            <div id="caretaker-detail" class="panel-body space-y-5"></div>
+          </article>
+        </div>
+
+        <article class="panel">
+          <div class="panel-head">
+            <h2 class="font-semibold tracking-tight">Report inbox</h2>
+            <span id="caretaker-inbox-count" class="text-xs text-slate-500">—</span>
+          </div>
+          <div id="caretaker-inbox" class="panel-body space-y-3"></div>
+        </article>
+      </section>
+
+      <!-- ──────────────────────────────────────────── therapist view -->
+      <section id="view-therapist" class="mx-auto hidden max-w-7xl space-y-6 px-4 py-6 lg:px-8 lg:py-8">
+        <div class="flex flex-wrap items-end justify-between gap-3">
+          <div>
+            <h1 class="text-2xl font-semibold tracking-tight text-white">Clinical overview</h1>
+            <p class="muted mt-1">Session history, reality-check evidence and notes on one shared record.</p>
+          </div>
+          <span class="chip bg-indigo-400/10 text-indigo-200 ring-indigo-400/30">Decision support · not a diagnosis</span>
+        </div>
+
+        <div id="therapist-stats" class="grid gap-4 sm:grid-cols-2 lg:grid-cols-4"></div>
+
+        <div class="grid gap-6 lg:grid-cols-12">
+          <article class="panel lg:col-span-4">
+            <div class="panel-head"><h2 class="font-semibold tracking-tight">Caseload</h2></div>
+            <div id="therapist-patients" class="panel-body space-y-2"></div>
+          </article>
+          <article class="panel lg:col-span-8">
+            <div class="panel-head">
+              <h2 id="therapist-detail-title" class="font-semibold tracking-tight">Progress</h2>
+              <span id="therapist-detail-range" class="text-xs text-slate-500">Last 14 days</span>
+            </div>
+            <div id="therapist-detail" class="panel-body space-y-5"></div>
+          </article>
+        </div>
+
+        <div class="grid gap-6 lg:grid-cols-12">
+          <article class="panel lg:col-span-7">
+            <div class="panel-head">
+              <h2 class="font-semibold tracking-tight">Clinical notes</h2>
+              <span class="text-xs text-slate-500">Routed to the caretaker too</span>
+            </div>
+            <div class="panel-body space-y-4">
+              <form id="note-form" class="space-y-2">
+                <label class="label" for="note-body">New note</label>
+                <textarea id="note-body" rows="3" class="field resize-none" maxlength="1200" placeholder="Observation, plan, follow-up…"></textarea>
+                <div class="flex items-center justify-between gap-3">
+                  <label class="flex items-center gap-2 text-xs text-slate-400">
+                    <input id="note-pinned" type="checkbox" class="h-4 w-4 accent-mint-400" /> Pin to top
+                  </label>
+                  <button class="btn-primary" type="submit">Save note</button>
+                </div>
+              </form>
+              <div id="therapist-notes" class="space-y-3"></div>
+            </div>
+          </article>
+          <div class="space-y-6 lg:col-span-5">
+            <article class="panel">
+              <div class="panel-head"><h2 class="font-semibold tracking-tight">Medication plan</h2></div>
+              <div class="panel-body space-y-4">
+                <form id="med-form" class="space-y-2">
+                  <div class="grid grid-cols-2 gap-2">
+                    <div><label class="label" for="med-name">Name</label><input id="med-name" class="field" required placeholder="Risperidone" /></div>
+                    <div><label class="label" for="med-dose">Dose</label><input id="med-dose" class="field" required placeholder="2 mg" /></div>
+                  </div>
+                  <div>
+                    <label class="label" for="med-times">Times (HH:MM, comma separated)</label>
+                    <input id="med-times" class="field" required placeholder="09:00, 21:00" />
+                  </div>
+                  <div><label class="label" for="med-instructions">Instructions</label><input id="med-instructions" class="field" placeholder="With food" /></div>
+                  <button class="btn-primary w-full" type="submit">Add medication</button>
+                </form>
+                <div id="therapist-meds" class="space-y-2"></div>
+              </div>
+            </article>
+            <article class="panel">
+              <div class="panel-head"><h2 class="font-semibold tracking-tight">Reports</h2></div>
+              <div id="therapist-reports" class="panel-body space-y-2"></div>
+            </article>
+          </div>
+        </div>
+
+        <article class="panel">
+          <div class="panel-head">
+            <h2 class="font-semibold tracking-tight">Escalation inbox</h2>
+            <span id="therapist-inbox-count" class="text-xs text-slate-500">—</span>
+          </div>
+          <div id="therapist-inbox" class="panel-body space-y-3"></div>
+        </article>
+      </section>
+
+      <footer class="mx-auto max-w-7xl px-4 pb-10 pt-4 text-xs leading-relaxed text-slate-500 lg:px-8">
+        Shezo reports what a device's camera and microphone did or did not pick up. It cannot settle whether an
+        experience is real, it does not diagnose, and every check goes to a human on the care team.
+      </footer>
+    </div>
+  </body>
+</html>

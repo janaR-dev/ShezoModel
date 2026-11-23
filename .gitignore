@@ -8,3 +8,8 @@ __pycache__/
 build/
 dist/
 .pytest_cache/
+
+# web build tooling and local server logs
+web/node_modules/
+web/package-lock.json
+*.log

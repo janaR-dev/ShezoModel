@@ -1,0 +1,93 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html {
+    color-scheme: dark;
+  }
+
+  body {
+    -webkit-font-smoothing: antialiased;
+    background-image:
+      radial-gradient(900px 500px at 15% -10%, rgba(28, 196, 151, 0.14), transparent 65%),
+      radial-gradient(800px 480px at 95% 0%, rgba(99, 102, 241, 0.16), transparent 60%);
+    background-repeat: no-repeat;
+    background-attachment: fixed;
+  }
+
+  ::selection {
+    background: rgba(62, 224, 180, 0.3);
+  }
+
+  :focus-visible {
+    outline: 2px solid #3ee0b4;
+    outline-offset: 2px;
+  }
+}
+
+@layer components {
+  .panel {
+    @apply rounded-2xl border border-white/10 bg-ink-900/70 shadow-panel backdrop-blur;
+  }
+
+  .panel-head {
+    @apply flex flex-wrap items-center justify-between gap-3 border-b border-white/10 px-5 py-4;
+  }
+
+  .panel-body {
+    @apply px-5 py-4;
+  }
+
+  .chip {
+    @apply inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-medium ring-1 ring-inset;
+  }
+
+  .btn {
+    @apply inline-flex items-center justify-center gap-2 rounded-xl px-4 py-2 text-sm font-semibold transition
+      disabled:cursor-not-allowed disabled:opacity-50;
+  }
+
+  .btn-primary {
+    @apply btn bg-mint-400 text-ink-950 hover:bg-mint-300;
+  }
+
+  .btn-ghost {
+    @apply btn border border-white/15 bg-white/5 text-slate-100 hover:bg-white/10;
+  }
+
+  .btn-quiet {
+    @apply btn px-3 py-1.5 text-xs text-slate-300 hover:bg-white/10;
+  }
+
+  .field {
+    @apply w-full rounded-xl border border-white/10 bg-ink-950/60 px-3.5 py-2.5 text-sm text-slate-100
+      placeholder:text-slate-500 focus:border-mint-400/60 focus:outline-none;
+  }
+
+  .label {
+    @apply mb-1.5 block text-xs font-semibold uppercase tracking-wider text-slate-400;
+  }
+
+  .stat-label {
+    @apply text-xs font-medium uppercase tracking-wider text-slate-400;
+  }
+
+  .stat-value {
+    @apply mt-1 text-2xl font-semibold tracking-tight text-white;
+  }
+
+  .muted {
+    @apply text-sm leading-relaxed text-slate-400;
+  }
+
+  .divider {
+    @apply border-t border-white/10;
+  }
+}
+
+/* Charts are drawn by Chart.js on a canvas; keep them from growing forever. */
+.chart-box {
+  position: relative;
+  height: 240px;
+}

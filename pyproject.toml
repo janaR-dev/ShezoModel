@@ -8,6 +8,8 @@ dependencies = []
 
 [project.optional-dependencies]
 dev = []
+# MySQL/MariaDB storage (the phpMyAdmin-backed default). SQLite needs nothing.
+mysql = ["pymysql>=1.1"]
 
 [tool.setuptools.packages.find]
 include = ["shezo*"]

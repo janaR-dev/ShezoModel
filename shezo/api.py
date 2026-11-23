@@ -15,6 +15,7 @@ import re
 import traceback
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 from urllib.parse import urlparse
 
@@ -24,10 +25,28 @@ from .auth import AuthError, AuthService, RoleError
 from .models import Medication, Note, Role, User, utcnow
 from .services import medications, progress, reports as report_service
 from .services.notifications import build_gateway
-from .storage import Repository, new_id
+from .storage import Repository, new_id, open_backend
 
 MAX_BODY_BYTES = 256 * 1024
 ALL_ROLES = (Role.PATIENT, Role.CARETAKER, Role.THERAPIST)
+
+#: Static front-end (plain HTML/CSS/JS) served by this same process, so the
+#: browser talks to the API on its own origin and no CORS setup is needed.
+WEB_ROOT = Path(__file__).resolve().parent.parent / "web"
+MIME_TYPES = {
+    ".html": "text/html; charset=utf-8",
+    ".css": "text/css; charset=utf-8",
+    ".js": "text/javascript; charset=utf-8",
+    ".json": "application/json; charset=utf-8",
+    ".svg": "image/svg+xml",
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".webp": "image/webp",
+    ".ico": "image/x-icon",
+    ".woff2": "font/woff2",
+    ".map": "application/json; charset=utf-8",
+}
 
 
 @dataclass
@@ -117,7 +136,18 @@ def me(ctx: AppContext, params, body, user, token) -> Dict[str, Any]:
 @route("GET", r"/api/patient/home", (Role.PATIENT,))
 def patient_home(ctx: AppContext, params, body, user, token) -> Dict[str, Any]:
     patient = _patient(ctx, user)
-    return progress.patient_home(ctx.repo, patient.id)
+    payload = progress.patient_home(ctx.repo, patient.id)
+    # The browser cannot remember a session across a reload, so the open one is
+    # handed back here. Idle sessions are closed (with their summary) on the way.
+    open_session = ctx.engine.resume_session(patient.id)
+    payload["open_session"] = open_session.public() if open_session else None
+    return payload
+
+
+@route("GET", r"/api/patient/progress", (Role.PATIENT,))
+def patient_progress_view(ctx: AppContext, params, body, user, token) -> Dict[str, Any]:
+    patient = _patient(ctx, user)
+    return progress.patient_progress(ctx.repo, patient.id)
 
 
 @route("GET", r"/api/patient/reports", (Role.PATIENT,))
@@ -134,15 +164,35 @@ def patient_reports(ctx: AppContext, params, body, user, token) -> Dict[str, Any
 def start_session(ctx: AppContext, params, body, user, token) -> Dict[str, Any]:
     patient = _patient(ctx, user)
     distress = body.get("distress_start")
+    camera_consent = bool(body.get("camera_consent"))
+    mic_consent = bool(body.get("mic_consent"))
+
+    # A reload (or a second tab) must not fork the record into two sessions.
+    existing = ctx.engine.resume_session(patient.id)
+    if existing:
+        session = ctx.engine.adopt_session(
+            existing,
+            distress=int(distress) if distress is not None else None,
+            camera_consent=camera_consent,
+            mic_consent=mic_consent,
+        )
+        ctx.repo.audit(user.id, "session.resumed", session.id, session.public())
+        return {
+            "session": session.public(),
+            "resumed": True,
+            "notice": "Your open grounding session was picked up again, so this check continues on the same record.",
+        }
+
     session = ctx.engine.open_session(
         patient.id,
         distress=int(distress) if distress is not None else None,
-        camera_consent=bool(body.get("camera_consent")),
-        mic_consent=bool(body.get("mic_consent")),
+        camera_consent=camera_consent,
+        mic_consent=mic_consent,
     )
     ctx.repo.audit(user.id, "session.opened", session.id, session.public())
     return {
         "session": session.public(),
+        "resumed": False,
         "notice": "Camera and microphone are read only while this session is open, and only with the consent you gave.",
     }
 
@@ -151,6 +201,13 @@ def start_session(ctx: AppContext, params, body, user, token) -> Dict[str, Any]:
 def create_check(ctx: AppContext, params, body, user, token) -> Dict[str, Any]:
     patient = _patient(ctx, user)
     session = _session_for(ctx, user, patient.id, params[0])
+    if ctx.engine.session_expired(session):
+        # Never write checks onto a session nobody is sitting with; close it so
+        # the care team still gets a summary, then ask for a fresh session.
+        ctx.engine.expire_session(session)
+        raise ValueError(
+            "this session timed out after inactivity and was closed. Start a new one."
+        )
     distress = body.get("distress")
 
     outcome = ctx.engine.run_reality_check(
@@ -167,12 +224,23 @@ def create_check(ctx: AppContext, params, body, user, token) -> Dict[str, Any]:
 @route("POST", r"/api/patient/sessions/([^/]+)/end", (Role.PATIENT,))
 def end_session(ctx: AppContext, params, body, user, token) -> Dict[str, Any]:
     patient = _patient(ctx, user)
-    _session_for(ctx, user, patient.id, params[0])
+    session = ctx.repo.get_session(params[0])
+    if not session or session.patient_id != patient.id:
+        raise ValueError("unknown session")
+    if session.status != "open":
+        return {"session": session.public()}
+
+    expired = ctx.engine.session_expired(session)
     distress = body.get("distress_end")
     session = ctx.engine.close_session(
-        params[0], int(distress) if distress is not None else None
+        session.id,
+        # An idle session closes with the last real rating, not one back-filled now.
+        None if expired else (int(distress) if distress is not None else None),
+        reason="timeout" if expired else "patient",
     )
-    ctx.repo.audit(user.id, "session.closed", session.id)
+    ctx.repo.audit(
+        user.id, "session.closed", session.id, {"reason": "timeout" if expired else "patient"}
+    )
     return {"session": session.public()}
 
 
@@ -308,6 +376,15 @@ def add_note(ctx: AppContext, params, body, user, token) -> Dict[str, Any]:
     return {"note": note.public()}
 
 
+@route("GET", r"/api/therapist/patients/([^/]+)/medications", (Role.THERAPIST,))
+def therapist_medications(ctx: AppContext, params, body, user, token) -> Dict[str, Any]:
+    patient = _guard(ctx, user, params[0])
+    return {
+        "medications": [med.public() for med in ctx.repo.list_medications(patient.id)],
+        "adherence": medications.adherence(ctx.repo, patient.id),
+    }
+
+
 @route("POST", r"/api/therapist/patients/([^/]+)/medications", (Role.THERAPIST,))
 def add_medication(ctx: AppContext, params, body, user, token) -> Dict[str, Any]:
     patient = _guard(ctx, user, params[0])
@@ -367,6 +444,41 @@ class ShezoHandler(BaseHTTPRequestHandler):
             raise ValueError("JSON body must be an object")
         return data
 
+    # -- static front-end
+    def _static(self, path: str) -> None:
+        root = WEB_ROOT.resolve()
+        relative = path.lstrip("/") or "index.html"
+        target = (root / relative).resolve()
+        if target != root and root not in target.parents:
+            self._send(403, {"ok": False, "error": "forbidden"})
+            return
+        if target.is_dir():
+            target = target / "index.html"
+        if not target.is_file():
+            body = (
+                "<!doctype html><meta charset='utf-8'><title>Shezo</title>"
+                "<body style='font-family:system-ui;background:#0b1220;color:#e2e8f0;padding:3rem'>"
+                "<h1>Shezo web app not found</h1>"
+                "<p>The front-end lives in <code>web/</code> next to the <code>shezo</code> package.</p>"
+                "<p>The JSON API is still running: <code>GET /api/health</code>.</p></body>"
+            ).encode("utf-8")
+            self.send_response(404)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        raw = target.read_bytes()
+        suffix = target.suffix.lower()
+        cache = "no-store" if suffix == ".html" else "public, max-age=300"
+        self.send_response(200)
+        self.send_header("Content-Type", MIME_TYPES.get(suffix, "application/octet-stream"))
+        self.send_header("Content-Length", str(len(raw)))
+        self.send_header("Cache-Control", cache)
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.end_headers()
+        self.wfile.write(raw)
+
     def _token(self) -> Optional[str]:
         header = self.headers.get("Authorization") or ""
         if header.lower().startswith("bearer "):
@@ -406,7 +518,13 @@ class ShezoHandler(BaseHTTPRequestHandler):
             self._send(500, {"ok": False, "error": f"internal error: {type(exc).__name__}"})
 
     def do_GET(self) -> None:  # noqa: N802
-        self._dispatch("GET")
+        if urlparse(self.path).path.startswith("/api/"):
+            self._dispatch("GET")
+        else:
+            try:
+                self._static(urlparse(self.path).path)
+            except (BrokenPipeError, ConnectionResetError):
+                pass
 
     def do_POST(self) -> None:  # noqa: N802
         self._dispatch("POST")
@@ -431,13 +549,19 @@ def serve(
 
 
 def main() -> None:
-    db = os.environ.get("SHEZO_DB", "shezo.db")
     host = os.environ.get("SHEZO_HOST", "127.0.0.1")
     port = int(os.environ.get("SHEZO_PORT", "8080"))
-    ctx = build_context(db)
+    repo, label = open_backend()
+    gateway = build_gateway()
+    ctx = AppContext(
+        repo=repo,
+        auth=AuthService(repo),
+        engine=GroundingEngine(repo, llm=None, gateway=gateway),
+        gateway=gateway,
+    )
     httpd = serve(ctx, host, port)
-    print(f"Shezo API on http://{host}:{httpd.server_address[1]}  (db={db})")
-    print("No UI: POST /api/auth/login, then use the patient/caretaker/therapist routes.")
+    print(f"Shezo on http://{host}:{httpd.server_address[1]}  (storage={label})")
+    print("Web app: /   ·   API: /api/health   ·   seed demo data: py -m shezo.seed")
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:

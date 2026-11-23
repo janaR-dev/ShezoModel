@@ -128,6 +128,15 @@ class ApiTests(unittest.TestCase):
         status, home = self.call("GET", "/api/patient/home", token=patient_token)
         self.assertEqual(status, 200)
         self.assertIn("reminders", home)
+        # A reload finds the same open session instead of losing it.
+        self.assertEqual(home["open_session"]["id"], session_id)
+
+        status, reopened = self.call(
+            "POST", "/api/patient/sessions", {"distress_start": 6}, token=patient_token
+        )
+        self.assertEqual(status, 200, reopened)
+        self.assertTrue(reopened["resumed"])
+        self.assertEqual(reopened["session"]["id"], session_id)
 
     def test_unknown_patient_is_forbidden_not_leaked(self):
         token = self.login("t@clinic.example", self.world["passwords"]["therapist"])

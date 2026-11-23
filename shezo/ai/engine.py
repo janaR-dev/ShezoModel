@@ -11,7 +11,9 @@ later, never lowered. A model can never talk the system out of an escalation.
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 from ..models import (
@@ -22,6 +24,7 @@ from ..models import (
     RiskLevel,
     Session,
     Verdict,
+    parse_ts,
     utcnow,
 )
 from ..storage import Repository, new_id
@@ -40,6 +43,21 @@ from .perception import (
     AudioObservation,
 )
 from .scoring import Assessment, assess
+
+
+#: A session with no checks for this long is closed automatically, so a tab the
+#: patient closed (or reloaded away) cannot leave an orphaned open session that
+#: keeps blocking new sessions and never gets a summary.
+SESSION_TIMEOUT_ENV = "SHEZO_SESSION_TIMEOUT_MINUTES"
+DEFAULT_SESSION_TIMEOUT_MINUTES = 90
+
+
+def session_timeout_minutes() -> int:
+    raw = os.environ.get(SESSION_TIMEOUT_ENV, str(DEFAULT_SESSION_TIMEOUT_MINUTES))
+    try:
+        return max(5, int(raw))
+    except (TypeError, ValueError):
+        return DEFAULT_SESSION_TIMEOUT_MINUTES
 
 
 @dataclass
@@ -248,7 +266,71 @@ class GroundingEngine:
         self.repo.add_session(session)
         return session
 
-    def close_session(self, session_id: str, distress_end: Optional[int] = None) -> Session:
+    def adopt_session(
+        self,
+        session: Session,
+        distress: Optional[int] = None,
+        camera_consent: bool = False,
+        mic_consent: bool = False,
+    ) -> Session:
+        """Reuse an open session, applying the consent choice just made.
+
+        A reload cannot carry browser state, so the patient's latest explicit
+        consent (the safe direction: withdrawing wins) is written to the session
+        they are continuing instead of opening a duplicate one.
+        """
+        session.camera_consent = camera_consent
+        session.mic_consent = mic_consent
+        if session.distress_start is None:
+            session.distress_start = distress
+        self.repo.update_session(session)
+        return session
+
+    def session_activity(self, session: Session) -> str:
+        """Timestamp of the last check in this session (or when it opened)."""
+        return max(
+            [session.started_at]
+            + [
+                check.created_at
+                for check in self.repo.list_reality_checks(session.patient_id)
+                if check.session_id == session.id
+            ]
+        )
+
+    def session_expired(self, session: Session) -> bool:
+        if session.status != "open":
+            return False
+        try:
+            last = parse_ts(self.session_activity(session))
+        except ValueError:
+            return True
+        return last < datetime.now(timezone.utc) - timedelta(minutes=session_timeout_minutes())
+
+    def expire_session(self, session: Session) -> Session:
+        """Close an idle session, writing the summary the patient never sent."""
+        closed = self.close_session(session.id, distress_end=None, reason="timeout")
+        self.repo.audit(None, "session.auto_closed", session.id, {"reason": "timeout"})
+        return closed
+
+    def resume_session(self, patient_id: str) -> Optional[Session]:
+        """The patient's live session, if any. Idle ones are closed first."""
+        live: List[Session] = []
+        for session in self.repo.list_sessions(patient_id):
+            if session.status != "open":
+                continue
+            if self.session_expired(session):
+                self.expire_session(session)
+            else:
+                live.append(session)
+        live.sort(key=lambda item: item.started_at)
+        return live[-1] if live else None
+
+    def close_session(
+        self,
+        session_id: str,
+        distress_end: Optional[int] = None,
+        reason: str = "patient",
+    ) -> Session:
         session = self.repo.get_session(session_id)
         if not session:
             raise ValueError("unknown session")
@@ -270,11 +352,23 @@ class GroundingEngine:
         if session.distress_start is not None and distress_end is not None:
             relief = session.distress_start - distress_end
         worst = max((check.risk_level for check in checks), key=lambda lvl: lvl.rank, default=RiskLevel.LOW)
+        if session.distress_start is None:
+            distress = "No distress rating at the start."
+        elif distress_end is None:
+            distress = f"Distress at the start {session.distress_start}; no end rating."
+        else:
+            distress = f"Distress {session.distress_start} → {distress_end}"
+            if relief is not None:
+                distress += f" (relief {relief})"
+            distress += "."
+        closed_by = (
+            f" Closed automatically after {session_timeout_minutes()} minutes without activity."
+            if reason == "timeout"
+            else ""
+        )
         summary = (
-            f"Session closed after {len(checks)} reality check(s). "
-            f"Distress {session.distress_start} → {distress_end}"
-            + (f" (relief {relief})." if relief is not None else ".")
-            + f" Peak risk: {worst.value}."
+            f"Session closed after {len(checks)} reality check(s). {distress}"
+            f" Peak risk: {worst.value}.{closed_by}"
         )
         patient = self.repo.get_patient(session.patient_id)
         if patient:
@@ -288,6 +382,7 @@ class GroundingEngine:
                     "session": session.public(),
                     "checks": [check.public() for check in checks],
                     "relief": relief,
+                    "closed_reason": reason,
                 },
                 author_id=patient.user_id,
                 author_role="patient",

@@ -4,8 +4,10 @@ Python model + JSON API for an AI-assisted grounding platform. One shared patien
 record, three role-scoped interfaces (patient, caretaker, therapist), camera/mic
 reality checks, medication reminders, and therapist-supervised progress tracking.
 
-**No UI is included**, by design: this repository is the model, the rules engine
-and the API the three interfaces will call.
+The repository contains the model, the rules engine, the JSON API and a plain
+HTML/CSS/JS web app (`web/`, Tailwind + Chart.js) with the three role-scoped
+dashboards. The UI does not change the AI contract: the browser sends summarised
+sensor numbers, never video or audio.
 
 ---
 
@@ -52,18 +54,71 @@ cannot do the most harmful thing a "reality checker" could do:
 
 ## Quickstart
 
-Requires Python 3.10+ (tested on 3.15). No third-party dependencies.
+Requires Python 3.10+ (tested on 3.15). The model and API use the standard
+library only; the MySQL backend additionally needs PyMySQL.
 
 ```bash
-py -m shezo.demo                 # full pipeline, in-memory, prints JSON sections
+py -m pip install pymysql        # only for the MySQL/MariaDB backend
+py -m shezo.seed                 # demo accounts + two weeks of history
+py -m shezo.api                  # web app + API on http://127.0.0.1:8080
+
+py -m shezo.demo                 # model pipeline only, in-memory, prints JSON
 py -m unittest discover -s tests -t .   # test suite
-py -m shezo.api                  # JSON API on http://127.0.0.1:8080
 ```
+
+Then open <http://127.0.0.1:8080/> and sign in with an account printed by the
+seed (`jordan@example.com` / `patient-pass-1`, `sam@family.example` /
+`family-pass-1`, `dr.reyes@clinic.example` / `therapy-pass-1`).
 
 The demo seeds a therapist, caretaker and patient, then runs: a visual report the
 camera cannot confirm → a report the camera *does* corroborate → a command
 hallucination that escalates → medication taken/missed → both care-team
 dashboards.
+
+## Web app
+
+`web/` is one page served by the API process itself (`GET /`), so the browser and
+the JSON API share an origin and no CORS or second dev server is needed.
+
+| View | What it does |
+| --- | --- |
+| Patient | Opens a consented grounding session, captures sensor summaries, runs a reality check, shows the verdict, grounding steps and disclosure, handles due/missed doses, shows the week's trend and care team |
+| Caretaker | Caseload with trend badges, adherence and distress charts, verdict mix, report inbox with acknowledgement |
+| Therapist | Same progress detail plus the patient's report list, clinical notes (routed to the caretaker) and the medication plan |
+
+**Camera and microphone.** The browser computes brightness, a Laplacian blur
+estimate, frame-to-frame motion, face count (only where `FaceDetector` exists) and
+loudness/speech presence with the Web Audio API, then posts those numbers. No
+frames or audio leave the device and nothing is stored. Because a browser cannot
+diarise speakers, `other_speaker` is always `false` from the web app — the model
+therefore never claims the microphone heard a *second* voice.
+
+**Dashboard charts.** Chart.js is vendored in `web/vendor/` and two small plugins
+are registered in `web/app.js`: one badges the latest point of each line (weekly
+adherence, in-session distress) and one draws the centre label of the verdict
+doughnut.
+
+Tailwind is compiled ahead of time, not pulled from a CDN:
+
+```bash
+cd web && npm install
+npx tailwindcss -c tailwind.config.js -i src/input.css -o tailwind.css --minify
+```
+
+## Storage
+
+`Repository` is written once against a small connection surface, so the same
+queries run on either backend:
+
+- **MySQL / MariaDB (default for the API)** — `shezo/mysql.py` adapts PyMySQL,
+  creates the `shezo` database and tables on first run, and the tables appear in
+  phpMyAdmin. Configure with `SHEZO_MYSQL_URL`
+  (`mysql://user:password@host:3306/database`).
+- **SQLite** — the default for the tests and `shezo.demo`, and the fallback the
+  server uses (with a printed warning) if MySQL is unreachable.
+
+`SHEZO_DB_ENGINE=mysql|sqlite` selects the backend for `py -m shezo.api` and
+`py -m shezo.seed`.
 
 ## API
 
@@ -72,8 +127,8 @@ dashboards.
 ### Patient
 | Method | Path | Purpose |
 | --- | --- | --- |
-| GET | `/api/patient/home` | reminders, recent checks, trend, care team |
-| POST | `/api/patient/sessions` | open a grounding session (consent flags) |
+| GET | `/api/patient/home` | reminders, recent checks, trend, care team, `open_session` |
+| POST | `/api/patient/sessions` | open a grounding session (consent flags); resumes an open one |
 | POST | `/api/patient/sessions/{id}/checks` | run a reality check |
 | POST | `/api/patient/sessions/{id}/end` | close session, write summary report |
 | GET | `/api/patient/medications` | plan + adherence |
@@ -153,7 +208,8 @@ An LLM failure, timeout, malformed response or unsafe phrase silently falls back
 
 `users`, `auth_tokens`, `patients`, `care_team`, `medications`, `doses`,
 `sessions`, `reality_checks`, `reports`, `report_recipients`, `deliveries`,
-`notes`, `audit` (SQLite; `Repository(":memory:")` or a file path).
+`notes`, `audit` (SQLite via `Repository(":memory:")`/a file path, or MySQL via
+`Repository(dsn="mysql://…")`).
 
 Doses are materialised per day per scheduled time, so adherence is a query.
 A dose pending past the grace window (60 min default) becomes `missed` exactly
@@ -163,11 +219,14 @@ once and emits exactly one care-team alert.
 
 | Variable | Meaning |
 | --- | --- |
-| `SHEZO_DB` | SQLite path for the API (default `shezo.db`) |
+| `SHEZO_DB_ENGINE` | `mysql` (default) or `sqlite` |
+| `SHEZO_MYSQL_URL` | MySQL DSN, default `mysql://root@127.0.0.1:3306/shezo` |
+| `SHEZO_DB` | SQLite path used when the engine is sqlite (default `shezo.db`) |
 | `SHEZO_HOST` / `SHEZO_PORT` | bind address (default `127.0.0.1:8080`) |
 | `SHEZO_LLM_API_KEY` | enables LLM narration |
 | `SHEZO_LLM_BASE_URL`, `SHEZO_LLM_MODEL` | endpoint/model override |
 | `SHEZO_WEBHOOK_URL` | extra delivery channel |
+| `SHEZO_SESSION_TIMEOUT_MINUTES` | idle session auto-close, default `90` (min 5) |
 
 ## Honest limitations
 
@@ -180,7 +239,12 @@ once and emits exactly one care-team alert.
   management, and a DPIA.
 - **Single-node.** SQLite and an in-process scheduler; a real deployment needs a
   job runner for reminders and a durable queue for delivery.
-- **No UI, no push notifications, no video telemetry.** WebRTC/streaming capture,
-  HIPAA/GDPR paperwork and the three front-ends are intentionally out of scope.
+- **No push notifications, no streaming media, coarse browser sensing.** The web
+  app summarises frames and loudness locally; there is no object detector beyond
+  the browser's `FaceDetector`, no speaker diarisation, and no video/audio
+  telemetry. HIPAA/GDPR paperwork and a real delivery provider are still needed.
+- **The web app is a local tool.** It binds to `127.0.0.1`, stores the bearer token
+  in `sessionStorage`, and has no TLS, no CSRF token and no multi-tenant
+  isolation beyond the care-team checks in the API.
 - Crisis lines in `ai/safety.py` are examples (US 988, UK 111, EU 112); localise
   them per deployment.
