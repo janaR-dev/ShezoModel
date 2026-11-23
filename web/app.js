@@ -24,6 +24,8 @@ const state = {
   selected: { caretaker: null, therapist: null },
   faceDetector: null,
   faceDetectorOff: false,
+  lastFaces: 0,
+  adherencePct: null,
 };
 
 const VERDICT_STYLE = {
@@ -125,6 +127,15 @@ function toast(message, tone = "info") {
     node.style.transition = "opacity 240ms ease";
     setTimeout(() => node.remove(), 260);
   }, 4200);
+}
+
+/** A permission prompt nobody answers must not leave the UI stuck on "Opening…". */
+function withTimeout(promise, ms, message) {
+  let timer;
+  const timeout = new Promise((resolve, reject) => {
+    timer = setTimeout(() => reject(new Error(message)), ms);
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
 }
 
 class ApiError extends Error {
@@ -444,11 +455,12 @@ async function loadPatient() {
   ]);
   state.home = home;
   $("patient-name").textContent = home.patient.display_name;
-  renderReminders(home.reminders, doses.doses);
+  // Same window as the doughnut below it, so the chip and the chart agree.
+  renderMedications(medications.medications, progress.adherence);
+  renderReminders(home.reminders);
   renderRecentChecks(home.recent_checks);
   renderTrend(home.trend, progress);
   renderCareTeam(home.care_team, home.patient.emergency_contact);
-  renderMedications(medications.medications, medications.adherence);
   renderAdherenceChart(progress);
   await adoptOpenSession(home.open_session);
 }
@@ -488,13 +500,26 @@ async function restoreSensors(open) {
   }
 }
 
-function renderReminders(reminders, doses) {
+function renderReminders(reminders) {
   $("reminder-message").textContent = reminders.message || "Nothing due right now.";
-  $("adherence-chip").textContent = reminders.due_now.length
+  // One chip carries both facts: what is due now, and the settled-dose rate.
+  const due = reminders.due_now.length
     ? `${reminders.due_now.length} due now`
     : reminders.missed.length
       ? `${reminders.missed.length} unconfirmed`
       : "On track";
+  const adherence = state.adherencePct;
+  const chip = $("adherence-chip");
+  chip.textContent = adherence === null ? due : `${due} · ${adherence}% adherence`;
+  chip.className = `chip ${
+    adherence === null
+      ? "bg-white/5 text-slate-300 ring-white/15"
+      : adherence >= 80
+        ? "bg-mint-400/10 text-mint-200 ring-mint-400/30"
+        : adherence >= 50
+          ? "bg-amber-400/15 text-amber-200 ring-amber-400/30"
+          : "bg-rose-500/15 text-rose-200 ring-rose-400/30"
+  }`;
 
   const rows = [];
   const push = (dose, tone) => {
@@ -543,11 +568,10 @@ async function actOnDose(doseId, action) {
 }
 
 function renderMedications(medications, adherence) {
-  const chip = $("adherence-chip");
-  if (adherence && adherence.adherence_pct !== null && adherence.adherence_pct !== undefined) {
-    chip.textContent = `${Math.round(adherence.adherence_pct)}% adherence`;
-    chip.className = "chip bg-mint-400/10 text-mint-200 ring-mint-400/30";
-  }
+  state.adherencePct =
+    adherence && adherence.adherence_pct !== null && adherence.adherence_pct !== undefined
+      ? Math.round(adherence.adherence_pct)
+      : null;
   $("med-list").innerHTML = medications.length
     ? medications
         .map(
@@ -645,7 +669,9 @@ function renderResult(data) {
   const risk = RISK_STYLE[check.risk_level] || RISK_STYLE.low;
 
   $("result-panel").classList.remove("hidden");
-  $("result-panel").scrollIntoView({ behavior: "smooth", block: "nearest" });
+  // "start" + the panel's scroll-margin-top parks the headline just below the
+  // sticky header; "nearest" left a tall panel showing only its last rows.
+  $("result-panel").scrollIntoView({ behavior: "smooth", block: "start" });
   $("result-headline").textContent = check.headline;
   $("result-verdict").className = `chip ${verdict.cls}`;
   $("result-verdict").textContent = verdict.label;
@@ -699,10 +725,14 @@ async function openCamera() {
   if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
     throw new Error("This browser cannot read the camera.");
   }
-  const stream = await navigator.mediaDevices.getUserMedia({
-    video: { width: { ideal: 640 }, height: { ideal: 480 }, facingMode: "user" },
-    audio: false,
-  });
+  const stream = await withTimeout(
+    navigator.mediaDevices.getUserMedia({
+      video: { width: { ideal: 640 }, height: { ideal: 480 }, facingMode: "user" },
+      audio: false,
+    }),
+    15000,
+    "The camera did not respond. Allow it in the browser's permission prompt, then tick Camera again.",
+  );
   state.cameraStream = stream;
   const video = $("camera-preview");
   video.srcObject = stream;
@@ -717,7 +747,11 @@ async function openMicrophone() {
   if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
     throw new Error("This browser cannot read the microphone.");
   }
-  state.audioStream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true } });
+  state.audioStream = await withTimeout(
+    navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true } }),
+    15000,
+    "The microphone did not respond. Allow it in the browser's permission prompt, then tick Microphone again.",
+  );
   attachAnalyser();
 }
 
@@ -785,7 +819,11 @@ function measureFrame() {
   }
   const brightness = sum / (luma.length * 255);
 
-  // Blur: mean absolute 4-neighbour Laplacian, normalised to 0..1.
+  // Blur: mean absolute 4-neighbour Laplacian, divided by the frame's own mean
+  // luma so a dim room is not reported as blurry. A fixed divisor made every
+  // real webcam frame score ~0.8-0.95 and look "too blurry" to the model.
+  // Calibrated on this metric: crisp synthetic 0.04, 5px-blurred synthetic 0.97,
+  // dim-but-sharp camera frame ~0.6.
   let lap = 0;
   let count = 0;
   for (let y = 1; y < height - 1; y += 1) {
@@ -796,8 +834,10 @@ function measureFrame() {
       count += 1;
     }
   }
-  const sharpness = count ? lap / count / 255 : 0;
-  const blur = Math.max(0, Math.min(1, 1 - sharpness * 6));
+  const meanLuma = luma.length ? sum / luma.length : 0;
+  const meanLap = count ? lap / count : 0;
+  const edgeRatio = meanLuma > 1 ? meanLap / meanLuma : 0;
+  const blur = Math.max(0, Math.min(1, 1 - edgeRatio / 0.25));
 
   let motion = 0;
   if (state.prevLuma && state.prevLuma.length === luma.length) {
@@ -882,11 +922,23 @@ async function sampleAudio(durationMs = 1400) {
   const floor = sorted[Math.floor(sorted.length * 0.2)];
   const loud = sorted[Math.floor(sorted.length * 0.85)];
   const speechFrames = levels.filter((level) => level > floor + 8).length;
+  // Energy alone is not speech: a fan, hum or steady music crosses any threshold.
+  // Speech is bursty, so its level keeps crossing its own mean — require that too.
+  // This is still only a guess about sound, never a transcription, which is why
+  // the model may not treat it as evidence of a voice.
+  const mean = levels.reduce((total, level) => total + level, 0) / levels.length;
+  let transitions = 0;
+  let above = levels[0] > mean;
+  levels.forEach((level) => {
+    const nowAbove = level > mean;
+    if (nowAbove !== above) transitions += 1;
+    above = nowAbove;
+  });
   return {
     transcript: "",
     duration_s: Number((durationMs / 1000).toFixed(1)),
     ambient_db: Number(floor.toFixed(0)),
-    speech_detected: speechFrames / levels.length > 0.25,
+    speech_detected: speechFrames / levels.length > 0.25 && transitions >= 3,
     other_speaker: false, // the browser cannot diarise; we do not pretend it can
     snr_db: Number(Math.max(3, Math.min(25, loud - floor)).toFixed(1)),
   };
@@ -942,6 +994,10 @@ function stopCameraOnly() {
     state.cameraStream.getTracks().forEach((track) => track.stop());
     state.cameraStream = null;
   }
+  // A frame from the previous session would otherwise read as motion and keep
+  // reporting the face count it had before the camera was switched off.
+  state.prevLuma = null;
+  state.lastFaces = 0;
   const video = $("camera-preview");
   if (video) video.srcObject = null;
   $("camera-placeholder").classList.remove("hidden");
@@ -1223,6 +1279,7 @@ async function loadCaretakerPatient(patientId) {
   $("caretaker-detail-range").textContent = `Last ${progress.window_days} days · ${when(progress.generated_at)}`;
   container.innerHTML = progressDetailHtml(progress, "caretaker");
   drawProgressCharts(progress, "caretaker");
+  highlightPicker("caretaker-patients", patientId);
 }
 
 function highlightPicker(containerId, patientId) {
@@ -1255,7 +1312,6 @@ async function loadTherapist() {
   state.selected.therapist = target.patient.id;
   renderPatientPicker("therapist-patients", dash.patients, "therapist");
   renderInbox("therapist-inbox", "therapist-inbox-count", dash.inbox, "/api/therapist/reports");
-  $("therapist-detail-title").textContent = `${target.patient.display_name} · progress`;
   await loadTherapistPatient(target.patient.id);
 }
 
@@ -1267,6 +1323,8 @@ async function loadTherapistPatient(patientId) {
     api(`/api/therapist/patients/${patientId}/medications`),
   ]);
   const container = $("therapist-detail");
+  // Switching patients in the picker must relabel the panel, not keep the old name.
+  $("therapist-detail-title").textContent = `${(progress.patient && progress.patient.display_name) || "Patient"} · progress`;
   $("therapist-detail-range").textContent = `Last ${progress.window_days} days · ${when(progress.generated_at)}`;
   container.innerHTML = progressDetailHtml(progress, "therapist");
   drawProgressCharts(progress, "therapist");

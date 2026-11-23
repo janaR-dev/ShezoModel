@@ -549,9 +549,14 @@ def serve(
 
 
 def main() -> None:
-    host = os.environ.get("SHEZO_HOST", "127.0.0.1")
-    # PaaS hosts (Render and friends) inject PORT; SHEZO_PORT wins locally.
-    port = int(os.environ.get("SHEZO_PORT") or os.environ.get("PORT") or "8080")
+    # Hosts that inject PORT are honoured; SHEZO_PORT wins locally.
+    local_port = os.environ.get("SHEZO_PORT")
+    port = int(local_port or os.environ.get("PORT") or "8080")
+    # A managed host reaches the process through its network interface, so listen
+    # on every interface there. Without an injected PORT the default stays
+    # loopback-only, so development never exposes the app on the LAN.
+    hosted = bool(os.environ.get("PORT")) and not local_port
+    host = os.environ.get("SHEZO_HOST") or ("0.0.0.0" if hosted else "127.0.0.1")
     repo, label = open_backend()
     gateway = build_gateway()
     ctx = AppContext(

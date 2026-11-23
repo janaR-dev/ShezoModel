@@ -29,7 +29,7 @@ _AUDITORY_CUES = (
 )
 
 _COMMAND_CUES = (
-    "tells me to", "told me to", "telling me to", "wants me to", "want me to",
+    "tells me to", "tell me to", "told me to", "telling me to", "wants me to", "want me to",
     "says i should", "said i should", "commands me", "commanding me",
     "orders me", "is making me", "makes me do", "told me not to tell",
     "said not to tell", "tells me not to tell", "says to hurt",
@@ -51,6 +51,38 @@ ENTITY_LEXICON = {
     "object": ("box", "bag", "chair", "door", "window", "mirror", "tv",
                "television", "computer", "lamp"),
 }
+
+_CHECK_CUES = (
+    "is this real", "is that real", "check the room", "can you see",
+    "can you hear", "am i seeing", "am i hearing", "is it there",
+    "reality check", "check reality",
+)
+
+_WORD_RE = re.compile(r"[a-z0-9']+")
+
+#: One alternation per cue family instead of one regex search per cue. This is
+#: behaviourally identical to ``any(cue in text for cue in cues)`` (and, for the
+#: entity lexicon, to ``any(\bword\b in text ...)``); it just replaces ~50 separate
+#: searches per check with one, which is the only hot loop in claim parsing.
+
+def _any_cue(cues: tuple) -> "re.Pattern[str]":
+    ordered = sorted(cues, key=len, reverse=True)
+    return re.compile("|".join(re.escape(cue) for cue in ordered))
+
+
+def _whole_word(words: tuple) -> "re.Pattern[str]":
+    ordered = sorted(words, key=len, reverse=True)
+    return re.compile(r"\b(?:" + "|".join(re.escape(word) for word in ordered) + r")\b")
+
+
+_VISUAL_RE = _any_cue(_VISUAL_CUES)
+_AUDITORY_RE = _any_cue(_AUDITORY_CUES)
+_COMMAND_RE = _any_cue(_COMMAND_CUES)
+_CHECK_RE = _any_cue(_CHECK_CUES)
+_ENTITY_RES = {
+    canonical: _whole_word(synonyms) for canonical, synonyms in ENTITY_LEXICON.items()
+}
+
 
 _ENTITY_TO_LABEL = {
     "person": "person",
@@ -90,32 +122,28 @@ class Claim:
 
 def parse_claim(text: str) -> Claim:
     lowered = (text or "").lower()
-    words = re.findall(r"[a-z0-9']+", lowered)
+    words = _WORD_RE.findall(lowered)
 
-    visual_hits = sum(1 for cue in _VISUAL_CUES if cue in lowered)
-    audio_hits = sum(1 for cue in _AUDITORY_CUES if cue in lowered)
+    visual = _VISUAL_RE.search(lowered) is not None
+    audio = _AUDITORY_RE.search(lowered) is not None
 
-    if visual_hits and audio_hits:
+    if visual and audio:
         modality = Modality.MIXED
-    elif audio_hits:
+    elif audio:
         modality = Modality.AUDITORY
-    elif visual_hits:
+    elif visual:
         modality = Modality.VISUAL
     else:
         modality = Modality.OTHER
 
-    entities: List[str] = []
-    for canonical, synonyms in ENTITY_LEXICON.items():
-        if any(re.search(rf"\b{re.escape(s)}\b", lowered) for s in synonyms):
-            entities.append(canonical)
+    entities: List[str] = [
+        canonical
+        for canonical, pattern in _ENTITY_RES.items()
+        if pattern.search(lowered) is not None
+    ]
 
-    is_command = any(cue in lowered for cue in _COMMAND_CUES)
-    asks_for_check = any(
-        phrase in lowered
-        for phrase in ("is this real", "is that real", "check the room", "can you see",
-                       "can you hear", "am i seeing", "am i hearing", "is it there",
-                       "reality check", "check reality")
-    )
+    is_command = _COMMAND_RE.search(lowered) is not None
+    asks_for_check = _CHECK_RE.search(lowered) is not None
 
     return Claim(
         text=(text or "").strip(),

@@ -87,6 +87,62 @@ class EngineTests(unittest.TestCase):
         )
         self.assertIs(outcome.check.verdict, Verdict.INCONCLUSIVE)
 
+    def test_dark_frame_is_inconclusive_not_no_sensor_evidence(self):
+        """5% brightness is a black or unlit frame: it cannot testify either way.
+
+        Regression: the darkness penalty used to be averaged into coverage, so a
+        dark-but-sharp frame scored 0.45 and the checker confidently reported
+        "no sensor evidence" about a room the camera never actually saw.
+        """
+        outcome = self.engine.run_reality_check(
+            self.patient.id,
+            "There is a man standing in the corner watching me.",
+            session_id=self.session.id,
+            frame=FrameSample(labels={}, brightness=0.05, blur=0.1),
+            audio=QUIET_MIC,
+        )
+        self.assertIs(outcome.check.verdict, Verdict.INCONCLUSIVE)
+        self.assertLessEqual(outcome.check.confidence, 0.4)
+        self.assertIn("too dark", outcome.check.sensor_summary)
+
+    def test_loudness_alone_cannot_corroborate_a_report_of_voices(self):
+        """An energy-only speech flag (a TV, music, traffic) is not a voice.
+
+        Regression: the microphone path used to corroborate "I hear voices" from
+        ``speech_detected`` alone, which a loudness threshold sets for any noise.
+        """
+        loud_only = AudioSample(duration_s=3.0, ambient_db=42.0, speech_detected=True, snr_db=22.0)
+        outcome = self.engine.run_reality_check(
+            self.patient.id,
+            "I hear voices talking about me.",
+            session_id=self.session.id,
+            audio=loud_only,
+        )
+        self.assertIs(outcome.check.verdict, Verdict.INCONCLUSIVE)
+        self.assertIn("TV", outcome.check.sensor_summary)
+
+    def test_diarised_speech_corroborates_a_report_of_voices(self):
+        diarised = AudioSample(duration_s=3.0, speech_detected=True, other_speaker=True, snr_db=20.0)
+        outcome = self.engine.run_reality_check(
+            self.patient.id,
+            "I hear voices talking about me.",
+            session_id=self.session.id,
+            audio=diarised,
+        )
+        self.assertIs(outcome.check.verdict, Verdict.CORROBORATED)
+
+    def test_transcribed_speech_corroborates_a_report_of_voices(self):
+        transcribed = AudioSample(
+            duration_s=3.0, speech_detected=True, snr_db=20.0, transcript="someone said her name"
+        )
+        outcome = self.engine.run_reality_check(
+            self.patient.id,
+            "I hear voices talking about me.",
+            session_id=self.session.id,
+            audio=transcribed,
+        )
+        self.assertIs(outcome.check.verdict, Verdict.CORROBORATED)
+
     def test_consent_gate_drops_camera_when_not_granted(self):
         session = self.engine.open_session(
             self.patient.id, distress=5, camera_consent=False, mic_consent=False

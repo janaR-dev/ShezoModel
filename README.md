@@ -91,7 +91,12 @@ estimate, frame-to-frame motion, face count (only where `FaceDetector` exists) a
 loudness/speech presence with the Web Audio API, then posts those numbers. No
 frames or audio leave the device and nothing is stored. Because a browser cannot
 diarise speakers, `other_speaker` is always `false` from the web app — the model
-therefore never claims the microphone heard a *second* voice.
+therefore never claims the microphone heard a *second* voice. Loudness is also
+never treated as speech: the app only raises its own speech guess when the level
+is both above the room floor and bursty, and the model still reports
+`inconclusive` for that, because a bare energy flag could be a television. Only
+transcribed speech or diarised `other_speaker` evidence can corroborate a report
+of voices.
 
 **Dashboard charts.** Chart.js is vendored in `web/vendor/` and two small plugins
 are registered in `web/app.js`: one badges the latest point of each line (weekly
@@ -193,8 +198,10 @@ assigned to them in the care team; unknown ids are 403, not 404, so ids do not l
 `GroundingEngine(frame_analyzer=..., audio_analyzer=...)`; anything from an
 on-device YOLO/CLIP detector to a cloud endpoint works. The default
 `MetadataFrameAnalyzer` trusts your device detector's labels and refuses to
-testify when the frame is dark, blurry, stale or moving too fast (it returns
-`inconclusive` rather than a false "nothing there").
+testify when the frame is dark (brightness below `0.12`), blurry (above `0.75`),
+stale (older than 5 s) or mostly unusable — each gate is checked on its own
+rather than averaged into the coverage score, and it returns `inconclusive`
+rather than a false "nothing there".
 
 **Narration.** Set `SHEZO_LLM_API_KEY` (or `OPENAI_API_KEY`) plus optional
 `SHEZO_LLM_BASE_URL`, `SHEZO_LLM_MODEL` for any OpenAI-compatible endpoint. With
@@ -222,48 +229,31 @@ once and emits exactly one care-team alert.
 | `SHEZO_DB_ENGINE` | `mysql` (default) or `sqlite` |
 | `SHEZO_MYSQL_URL` | MySQL DSN, default `mysql://root@127.0.0.1:3306/shezo` |
 | `SHEZO_DB` | SQLite path used when the engine is sqlite (default `shezo.db`) |
-| `SHEZO_HOST` / `SHEZO_PORT` | bind address (default `127.0.0.1:8080`); `PORT` is used when `SHEZO_PORT` is unset (PaaS hosts) |
+| `SHEZO_HOST` / `SHEZO_PORT` | bind address (default `127.0.0.1:8080`); `PORT` is used when `SHEZO_PORT` is unset |
 | `SHEZO_LLM_API_KEY` | enables LLM narration |
 | `SHEZO_LLM_BASE_URL`, `SHEZO_LLM_MODEL` | endpoint/model override |
 | `SHEZO_WEBHOOK_URL` | extra delivery channel |
 | `SHEZO_SESSION_TIMEOUT_MINUTES` | idle session auto-close, default `90` (min 5) |
 
-## Hosting it for testers (free, HTTPS)
+## Deployment
 
-Browsers only expose `getUserMedia` in a secure context, so a shared link must
-be HTTPS — `http://127.0.0.1` is the one local exception. There are two free
-routes:
+There is no host-specific configuration in this repository: it runs wherever
+Python 3.10+ is available (plus MySQL/MariaDB if you want the phpMyAdmin-backed
+engine), with `py -m shezo.seed` once and `py -m shezo.api` as the server command.
+Any host that runs a Python process and injects `PORT` works: the server then
+binds `0.0.0.0` automatically, while locally it stays on `127.0.0.1` unless
+`SHEZO_HOST` says otherwise.
 
-### Render (no machine needed)
+Browsers only expose `getUserMedia` in a secure context, so anything users reach
+over the network must be served over HTTPS; `http://127.0.0.1` is the one local
+exception. Shared PHP/MySQL hosting (AwardSpace included) cannot run this process
+— it needs a Python runtime, not PHP — so use a Python-capable host or a tunnel.
+On a host with an ephemeral filesystem, keep `SHEZO_DB_ENGINE=mysql` and point
+`SHEZO_MYSQL_URL` at the hosted database, or the SQLite file is recreated empty
+on every restart.
 
-`render.yaml` at the repo root defines a free web service: `SHEZO_HOST=0.0.0.0`,
-SQLite storage, `/api/health` as the health check, and
-`python -m shezo.seed && python -m shezo.api` as the start command.
-
-1. Render → **New → Blueprint** → pick this repository → **Apply**.
-2. Deploy; Render serves it at `https://<name>.onrender.com` with a real
-   certificate, which is what makes camera/microphone capture work there.
-3. Optional: add `SHEZO_LLM_API_KEY` under **Environment** (never in git).
-
-Free instances sleep after 15 idle minutes (about a minute to wake) and have an
-ephemeral filesystem, so the SQLite database is re-seeded from `shezo.seed` on
-every boot and test data resets.
-
-### Cloudflare quick tunnel (uses this machine and its MySQL data)
-
-With `py -m shezo.api` running locally:
-
-```bash
-cloudflared tunnel --url http://127.0.0.1:8080
-```
-
-It prints an `https://<random>.trycloudflare.com` URL that is HTTPS, so the
-sensor consent flow works unchanged. It lives only while the tunnel and this
-machine stay up, and the URL changes each run. There is no account, but quick
-tunnels are rate-limited and have no uptime guarantee.
-
-Either way: the public instance uses the seeded demo accounts, so change those
-passwords (or the seed) before sharing, and keep real patient data out of it.
+A shared instance uses the seeded demo accounts, so change those passwords (or
+the seed) before sharing, and keep real patient data out of it.
 
 ## Honest limitations
 
@@ -281,9 +271,8 @@ passwords (or the seed) before sharing, and keep real patient data out of it.
   the browser's `FaceDetector`, no speaker diarisation, and no video/audio
   telemetry. HIPAA/GDPR paperwork and a real delivery provider are still needed.
 - **The web app is a demo, not a deployment.** By default it binds to
-  `127.0.0.1` and stores the bearer token in `sessionStorage`. `render.yaml`
-  gives a free HTTPS demo, but there is still no CSRF token, no encrypted
-  database, no session revocation list and no multi-tenant isolation beyond the
-  care-team checks in the API.
+  `127.0.0.1` and stores the bearer token in `sessionStorage`. There is still no
+  CSRF token, no encrypted database, no session revocation list and no
+  multi-tenant isolation beyond the care-team checks in the API.
 - Crisis lines in `ai/safety.py` are examples (US 988, UK 111, EU 112); localise
   them per deployment.

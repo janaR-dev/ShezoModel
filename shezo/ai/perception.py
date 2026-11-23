@@ -18,6 +18,16 @@ from ..models import utcnow
 
 MIN_CONFIDENT_LABEL = 0.35
 
+#: Hard usability gates. A frame that fails any one of them cannot testify about
+#: the room: at 5% mean brightness a dark corner and a black image are
+#: indistinguishable, so reporting "the detector found nothing" would be a claim
+#: the frame cannot support. These checks are explicit rather than folded into the
+#: coverage score so a single bad property cannot be averaged away.
+MIN_USABLE_BRIGHTNESS = 0.12
+MAX_USABLE_BLUR = 0.75
+MAX_FRAME_AGE_S = 5.0
+MIN_USABLE_COVERAGE = 0.25
+
 
 @dataclass
 class FrameSample:
@@ -104,7 +114,7 @@ class AudioAnalyzer(Protocol):
 
 def _coverage_from_frame(sample: FrameSample) -> float:
     """Usable coverage: dark, blurry or stale frames cannot testify about a room."""
-    if sample.seconds_since_frame > 5:
+    if sample.seconds_since_frame > MAX_FRAME_AGE_S:
         return 0.0
     coverage = 0.55
     if sample.brightness >= 0.18:
@@ -120,6 +130,19 @@ def _coverage_from_frame(sample: FrameSample) -> float:
     return max(0.0, min(1.0, coverage))
 
 
+def _unusable_reason(sample: FrameSample, coverage: float) -> str:
+    """Why this frame cannot testify, or an empty string when it can."""
+    if sample.seconds_since_frame > MAX_FRAME_AGE_S:
+        return f"the last frame was {sample.seconds_since_frame:.0f}s old"
+    if sample.brightness < MIN_USABLE_BRIGHTNESS:
+        return f"the frame was too dark (brightness {sample.brightness:.2f})"
+    if sample.blur > MAX_USABLE_BLUR:
+        return f"the frame was too blurry (blur {sample.blur:.2f})"
+    if coverage < MIN_USABLE_COVERAGE:
+        return f"only {coverage:.2f} of the frame was usable"
+    return ""
+
+
 class MetadataFrameAnalyzer:
     """Trusts the device detector's labels; refuses to testify when unusable."""
 
@@ -130,11 +153,15 @@ class MetadataFrameAnalyzer:
         if sample is None:
             return VisualObservation(available=False, coverage=0.0, summary="Camera was off for this check.")
         coverage = _coverage_from_frame(sample)
-        if coverage < 0.25:
+        reason = _unusable_reason(sample, coverage)
+        if reason:
             return VisualObservation(
                 available=False,
                 coverage=coverage,
-                summary="Camera image was too dark, too blurry or too old to tell us anything.",
+                summary=(
+                    f"Camera image could not be read: {reason}. "
+                    "This check has no usable camera evidence either way."
+                ),
             )
         detected = sorted(
             label for label, score in (sample.labels or {}).items() if score >= self.min_score
@@ -162,10 +189,15 @@ class MicrophoneAnalyzer:
         if sample.duration_s < 0.8:
             return AudioObservation(available=False, coverage=0.2, summary="Audio clip was too short to analyse.")
         coverage = 0.85 if sample.snr_db >= 5 else 0.45
-        if sample.speech_detected and sample.other_speaker:
+        if sample.other_speaker:
             summary = "Microphone recorded another speaker talking during the check."
-        elif sample.speech_detected:
+        elif sample.transcript.strip():
             summary = "Microphone recorded speech during the check (a single nearby speaker)."
+        elif sample.speech_detected:
+            summary = (
+                "Microphone recorded sound during the check, but the device could not identify "
+                "speech in it — a TV, music or traffic sounds the same."
+            )
         else:
             summary = (
                 f"Microphone recorded no speech, only room tone around {sample.ambient_db:.0f} dB."

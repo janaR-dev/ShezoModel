@@ -93,12 +93,27 @@ def assess(
                 " ".join(parts),
                 "Microphone was not available, so the report could not be tested against a recording.",
             )
-        if audio.other_speaker or (audio.speech_detected and audio.coverage >= 0.8):
+        # Loudness is not a voice. A television, music, traffic or a fan crosses any
+        # energy threshold, so only recognised speech content (a transcript) or
+        # diarisation ("another speaker") may corroborate a report of voices. A bare
+        # ``speech_detected`` flag from an energy heuristic never can.
+        if audio.other_speaker or audio.transcript.strip():
             return Assessment(
                 Verdict.CORROBORATED,
                 _cap(0.55 + 0.25 * audio.coverage),
                 " ".join(parts),
-                "The microphone picked up speech from another speaker, so sound was present in the room.",
+                "The microphone recorded speech "
+                + ("from another speaker " if audio.other_speaker else "")
+                + "during the window, so sound a bystander could have heard was present in the room.",
+            )
+        if audio.speech_detected:
+            return Assessment(
+                Verdict.INCONCLUSIVE,
+                _cap(0.40 + 0.10 * audio.coverage),
+                " ".join(parts),
+                "The microphone recorded sound, but the device could not identify speech in it. "
+                "A TV, music or the street sounds the same, so this reading neither corroborates "
+                "nor contradicts what you heard.",
             )
         return Assessment(
             Verdict.NO_SENSOR_EVIDENCE,

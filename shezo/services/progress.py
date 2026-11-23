@@ -98,8 +98,11 @@ def patient_progress(
         bool(prev_sessions or prev_checks),
     )
 
+    patient = repo.get_patient(patient_id)
     return {
         "patient_id": patient_id,
+        # The panels label themselves from this, so a picker click can relabel.
+        "patient": patient.public() if patient else None,
         "generated_at": now,
         "window_days": days,
         "window_start": window_start,
