@@ -22,9 +22,13 @@ const state = {
   previewTimer: null,
   charts: {},
   selected: { caretaker: null, therapist: null },
-  faceDetector: null,
+  faceDetectorPromise: null,
   faceDetectorOff: false,
+  faceResult: [],
+  faceResultAt: 0,
+  faceBusy: false,
   lastFaces: 0,
+  lastFaceScore: 0,
   adherencePct: null,
 };
 
@@ -788,14 +792,22 @@ function stopMedia() {
 
 function startPreviewLoop() {
   if (state.previewTimer) return;
-  state.previewTimer = setInterval(() => {
+  state.previewTimer = setInterval(async () => {
     try {
       const sample = measureFrame();
-      if (sample) paintMetrics(sample);
+      if (!sample) return;
+      // BlazeFace costs a couple of milliseconds per frame, so every tick is
+      // affordable.
+      if (state.cameraStream) {
+        const { count, score } = await detectFaces();
+        state.lastFaces = count;
+        state.lastFaceScore = score;
+      }
+      paintMetrics({ ...sample, faces: state.lastFaces, faceScore: state.lastFaceScore });
     } catch (error) {
       /* a dropped frame must never break the page */
     }
-  }, 700);
+  }, 800);
 }
 
 const frameCanvas = document.createElement("canvas");
@@ -855,15 +867,71 @@ function measureFrame() {
   };
 }
 
-async function detectFaces() {
-  if (state.faceDetectorOff || typeof window.FaceDetector !== "function") return 0;
-  try {
-    state.faceDetector = state.faceDetector || new window.FaceDetector({ fastMode: true, maxDetectedFaces: 4 });
-    const faces = await state.faceDetector.detect(frameCanvas);
-    return faces ? faces.length : 0;
-  } catch (error) {
+/**
+ * MediaPipe BlazeFace (short range), vendored in web/vendor/face and run on this
+ * device. Shipping Chrome has no FaceDetector, which is why every frame used to
+ * report zero faces.
+ */
+function ensureFaceDetector() {
+  if (state.faceDetectorPromise) return state.faceDetectorPromise;
+  state.faceDetectorPromise = (async () => {
+    if (typeof window.FaceDetection !== "function") return null;
+    const detector = new window.FaceDetection({
+      locateFile: (file) => `/vendor/face/${file}`,
+    });
+    // 0.3 rather than the 0.5 default: a three-quarter turn or a face lit from
+    // one side scores 0.35-0.5 and would otherwise read as "no face".
+    detector.setOptions({ model: "short", minDetectionConfidence: 0.3 });
+    detector.onResults((results) => {
+      state.faceResult = results.detections || [];
+      state.faceResultAt = performance.now();
+    });
+    await detector.initialize();
+    return detector;
+  })().catch(() => {
     state.faceDetectorOff = true;
-    return 0;
+    return null;
+  });
+  return state.faceDetectorPromise;
+}
+
+/**
+ * The detector's confidence for one detection. The minified release carries it
+ * as ``V[0].ga`` rather than the documented ``score``, so read both and fall
+ * back to 0 rather than inventing a number.
+ */
+function faceScore(detection) {
+  const value = detection.score ?? (detection.V && detection.V[0] && detection.V[0].ga);
+  return typeof value === "number" && Number.isFinite(value) ? value : 0;
+}
+
+/** Face count and best score for the current video frame. */
+async function detectFaces() {
+  const video = $("camera-preview");
+  if (state.faceDetectorOff) return { count: 0, score: 0 };
+  if (!video || !video.videoWidth || video.readyState < 2) return { count: 0, score: 0 };
+  // One frame at a time: the preview loop and a grounding check can otherwise
+  // call send() together, and the overlapping call comes back empty.
+  if (state.faceBusy) {
+    return { count: state.lastFaces || 0, score: state.lastFaceScore || 0 };
+  }
+  const detector = await ensureFaceDetector();
+  if (!detector) return { count: 0, score: 0 };
+  state.faceBusy = true;
+  try {
+    const before = state.faceResultAt || 0;
+    // Full video resolution, not the 160x120 measuring canvas: tiny faces were
+    // exactly what the old path could not see.
+    await detector.send({ image: video });
+    // Trust only a result produced by this frame, never last frame's array.
+    if ((state.faceResultAt || 0) <= before) return { count: 0, score: 0 };
+    const faces = state.faceResult;
+    const score = faces.reduce((best, face) => Math.max(best, faceScore(face)), 0);
+    return { count: faces.length, score };
+  } catch (error) {
+    return { count: 0, score: 0 };
+  } finally {
+    state.faceBusy = false;
   }
 }
 
@@ -872,7 +940,9 @@ function paintMetrics(sample) {
   $("m-blur").textContent = sample.blur.toFixed(2);
   $("m-motion").textContent = sample.motion.toFixed(2);
   $("m-faces").textContent = String(sample.faces);
-  $("m-labels").textContent = sample.faces > 0 ? "person" : "none";
+  $("m-labels").textContent = sample.faces > 0
+    ? `person ${Number(sample.faceScore || 0).toFixed(2)}`
+    : "none";
   if (state.analyser) {
     const buf = new Float32Array(state.analyser.fftSize);
     state.analyser.getFloatTimeDomainData(buf);
@@ -888,14 +958,15 @@ function paintMetrics(sample) {
 async function grabFrameSample() {
   const sample = measureFrame();
   if (!sample) return null;
-  const faces = await detectFaces();
-  state.lastFaces = faces;
+  const { count, score } = await detectFaces();
+  state.lastFaces = count;
+  state.lastFaceScore = score;
   const labels = {};
-  // Only labels this browser can actually produce. No guessing for the model.
-  if (faces > 0) labels.person = 0.9;
+  // Only labels this device actually produced, at the detector's own score.
+  if (count > 0) labels.person = Number(score.toFixed(2));
   return {
     labels,
-    faces,
+    faces: count,
     brightness: sample.brightness,
     blur: sample.blur,
     motion: sample.motion,
@@ -998,6 +1069,7 @@ function stopCameraOnly() {
   // reporting the face count it had before the camera was switched off.
   state.prevLuma = null;
   state.lastFaces = 0;
+  state.lastFaceScore = 0;
   const video = $("camera-preview");
   if (video) video.srcObject = null;
   $("camera-placeholder").classList.remove("hidden");

@@ -86,10 +86,18 @@ the JSON API share an origin and no CORS or second dev server is needed.
 | Caretaker | Caseload with trend badges, adherence and distress charts, verdict mix, report inbox with acknowledgement |
 | Therapist | Same progress detail plus the patient's report list, clinical notes (routed to the caretaker) and the medication plan |
 
-**Camera and microphone.** The browser computes brightness, a Laplacian blur
-estimate, frame-to-frame motion, face count (only where `FaceDetector` exists) and
-loudness/speech presence with the Web Audio API, then posts those numbers. No
-frames or audio leave the device and nothing is stored. Because a browser cannot
+**Camera and microphone.** The browser computes brightness, a contrast-normalised
+Laplacian blur estimate, frame-to-frame motion, face count and loudness/speech
+presence with the Web Audio API, then posts those numbers. No frames or audio
+leave the device and nothing is stored.
+
+**Face detection** runs MediaPipe BlazeFace (short range) from
+`web/vendor/face/` on this device — about 6 MB of wasm plus a 230 KB model,
+loaded only when the camera opens. It replaced `window.FaceDetector`, the
+experimental Shape Detection API that shipping Chrome does not expose, which is
+why every frame used to report zero faces. Detection runs on the full video
+frame, and the detector's own score becomes the `person` confidence the engine
+sees, so a face in view can corroborate a report about a person. Because a browser cannot
 diarise speakers, `other_speaker` is always `false` from the web app — the model
 therefore never claims the microphone heard a *second* voice. Loudness is also
 never treated as speech: the app only raises its own speech guess when the level

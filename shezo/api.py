@@ -46,6 +46,11 @@ MIME_TYPES = {
     ".ico": "image/x-icon",
     ".woff2": "font/woff2",
     ".map": "application/json; charset=utf-8",
+    ".mjs": "text/javascript; charset=utf-8",
+    # The vendored face detector: WebAssembly and its model blobs.
+    ".wasm": "application/wasm",
+    ".tflite": "application/octet-stream",
+    ".binarypb": "application/octet-stream",
 }
 
 
